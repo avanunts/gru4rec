@@ -1,6 +1,8 @@
 import argparse
 import os
 import shutil
+from tempfile import TemporaryDirectory
+import gc
 
 class MyHelpFormatter(argparse.HelpFormatter):
     def __init__(self, *args, **kwargs):
@@ -9,11 +11,13 @@ class MyHelpFormatter(argparse.HelpFormatter):
 
 parser = argparse.ArgumentParser(formatter_class=MyHelpFormatter, description='Train or load a GRU4Rec model & measure recall and MRR on the specified test set(s).')
 parser.add_argument('path', metavar='PATH', type=str, help='Path to the training data (TAB separated file (.tsv or .txt) or pickled pandas.DataFrame object (.pickle)) (if the --load_model parameter is NOT provided) or to the serialized model (if the --load_model parameter is provided).')
+parser.add_argument('-f', '--format', type=str, default='exploded', help='Which format to use, options are: joined or exploded. In exploded a tab-separated dataset is expected. In joined a parquet file.')
 parser.add_argument('-ps', '--parameter_string', metavar='PARAM_STRING', type=str, help='Training parameters provided as a single parameter string. The format of the string is `param_name1=param_value1,param_name2=param_value2...`, e.g.: `loss=bpr-max,layers=100,constrained_embedding=True`. Boolean training parameters should be either True or False; parameters that can take a list should use / as the separator (e.g. layers=200/200). Mutually exclusive with the -pf (--parameter_file) and the -l (--load_model) arguments and one of the three must be provided.')
 parser.add_argument('-pf', '--parameter_file', metavar='PARAM_PATH', type=str, help='Alternatively, training parameters can be set using a config file specified in this argument. The config file must contain a single OrderedDict named `gru4rec_params`. The parameters must have the appropriate type (e.g. layers = [100]). Mutually exclusive with the -ps (--parameter_string) and the -l (--load_model) arguments and one of the three must be provided.')
 parser.add_argument('-l', '--load_model', action='store_true', help='Load an already trained model instead of training a model. Mutually exclusive with the -ps (--parameter_string) and the -pf (--parameter_file) arguments and one of the three must be provided.')
 parser.add_argument('-s', '--save_model', metavar='MODEL_PATH', type=str, help='Save the trained model to the MODEL_PATH. (Default: don\'t save model)')
 parser.add_argument('-t', '--test', metavar='TEST_PATH', type=str, nargs='+', help='Path to the test data set(s) located at TEST_PATH. Multiple test sets can be provided (separate with spaces). (Default: don\'t evaluate the model)')
+parser.add_argument('-i', '--inference', metavar='INFERENCE_PATH', type=str, help='Path to the folder with datasets to infer model located at INFERENCE_PATH.')
 parser.add_argument('-m', '--measure', metavar='AT', type=int, nargs='+', default=[20], help='Measure recall & MRR at the defined recommendation list length(s). Multiple values can be provided. (Default: 20)')
 parser.add_argument('-e', '--eval_type', metavar='EVAL_TYPE', choices=['standard', 'conservative', 'median', 'tiebreaking'], default='standard', help='Sets how to handle if multiple items in the ranked list have the same prediction score (which is usually due to saturation or an error). See the documentation of evaluate_gpu() in evaluation.py for further details. (Default: standard)')
 parser.add_argument('-ss', '--sample_store_size', metavar='SS', type=int, default=10000000, help='GRU4Rec uses a buffer for negative samples during training to maximize GPU utilization. This parameter sets the buffer length. Lower values require more frequent recomputation, higher values use more (GPU) memory. Unless you know what you are doing, you shouldn\'t mess with this parameter. (Default: 10000000)')
@@ -31,10 +35,25 @@ import sys
 import time
 from collections import OrderedDict
 from gru4rec import GRU4Rec
+import ds_format
 import evaluation
+import inference
 import importlib.util
 import joblib
 os.chdir(orig_cwd)
+
+
+def convert_joined_ds_and_store(joined_ds_path, f_name, tmp_dir, with_inference=False, item_id_map=None):
+    joined = pd.read_parquet(joined_ds_path)
+    result_path = os.path.join(tmp_dir.name, f_name)
+    print('Temporal path for exploded ds: {}...'.format(result_path))
+    print('Convert joined ds to exploded and save...')
+    ds_format.convert_joined_to_exploded(joined, with_inference, item_id_map).to_csv(result_path, sep='\t')
+    print('Free memory...')
+    del joined
+    gc.collect()
+    return result_path
+
 
 def load_data(fname, gru):
     if fname.endswith('.pickle'):
@@ -91,8 +110,16 @@ else:
         gru4rec_params = OrderedDict([x.split('=') for x in args.parameter_string.split(',')])
     gru = GRU4Rec()
     gru.set_params(**gru4rec_params)
+    if args.format == ds_format.JOINED:
+        tmp_dir = TemporaryDirectory()
+        train_path = convert_joined_ds_and_store(args.path, 'train.tsv', tmp_dir)
+    elif args.format == ds_format.EXPLODED:
+        train_path = args.path
+    else:
+        print('--format (-f) option must be one of two: {}/{}, but it is {}.'.format(ds_format.JOINED, ds_format.EXPLODED, args.format))
+        sys.exit(1)
     print('Loading training data...')
-    data = load_data(args.path, gru)
+    data = load_data(train_path, gru)
     store_type = 'cpu' if args.sample_store_on_cpu else 'gpu'
     if store_type == 'cpu':
         print('WARNING! The sample store is set to be on the CPU. This will make training significantly slower on the GPU.')
@@ -114,11 +141,19 @@ if args.test_against_items is not None:
     supp = data.groupby('ItemId').size()
     supp.sort_values(inplace=True, ascending=False)
     items = supp[:args.test_against_items].index
-    
+
+if (args.test is not None) + (args.inference is not None) > 1:
+    print('ERROR. Maximum one of the following parameters must be provided: --test, --inference')
+    sys.exit(1)
+
 if args.test is not None:
     for test_file in args.test:
+        if args.format == ds_format.JOINED:
+            test_path = convert_joined_ds_and_store(test_file, 'test.tsv', tmp_dir)
+        else:
+            test_path = test_file
         print('Loading test data...')
-        test_data = load_data(test_file, gru)
+        test_data = load_data(test_path, gru)
         for c in args.measure:
             print('Starting evaluation (cut-off={}, using {} mode for tiebreaking)'.format(c, args.eval_type))
             t0 = time.time()
@@ -126,3 +161,38 @@ if args.test is not None:
             t1 = time.time()
             print('Evaluation took {:.2f}s'.format(t1 - t0))
             print('Recall@{}: {:.6f} MRR@{}: {:.6f}'.format(c, res[0], c, res[1]))
+
+if args.inference is not None:
+    if len(args.measure) != 1:
+        print('Must use only one cutoff for inference, got list {}'.format(args.measure))
+        sys.exit(1)
+    if args.format != ds_format.JOINED:
+        print('Must use inference only with --format (-f) set to joined, but use with {} instead'.format(args.format))
+        sys.exit(1)
+    input_dir = args.inference
+    predictions_folder_name = 'predictions'
+    predictions_dir = os.path.join(input_dir, predictions_folder_name)
+    if not os.path.exists(predictions_dir):
+        os.mkdir(predictions_dir)
+    for f_name in os.listdir(input_dir):
+        if f_name == predictions_folder_name:
+            continue
+        f_path = os.path.join(input_dir, f_name)
+        input_path = convert_joined_ds_and_store(f_path, f_name, tmp_dir, with_inference=True, item_id_map=gru.itemidmap)
+        output_path = os.path.join(predictions_dir, f_name)
+        print('Loading inference data from path {}'.format(input_path))
+        input_data = load_data(input_path, gru)
+        c = args.measure[0]
+        print('Starting inference (cut-off={}, using {} mode for tiebreaking)'.format(c, args.eval_type))
+        t0 = time.time()
+        results = inference.infer_gpu(gru, input_data, items, batch_size=100, cut_off=c, mode=args.eval_type)
+        t1 = time.time()
+        print('Inference took {:.2f}s'.format(t1 - t0))
+        print('Saving results to {}'.format(output_path))
+        t2 = time.time()
+        results.to_parquet(output_path, engine='pyarrow')
+        t3 = time.time()
+        print('Saving took {:.2f}s'.format(t3 - t2))
+
+if args.format == ds_format.JOINED:
+    tmp_dir.cleanup()
