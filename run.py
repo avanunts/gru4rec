@@ -43,12 +43,12 @@ import joblib
 os.chdir(orig_cwd)
 
 
-def convert_joined_ds_and_store(joined_ds_path, f_name, tmp_dir, with_inference=False, item_id_map=None):
+def convert_joined_ds_and_store(joined_ds_path, f_name, tmp_dir):
     joined = pd.read_parquet(joined_ds_path)
     result_path = os.path.join(tmp_dir.name, f_name)
     print('Temporal path for exploded ds: {}...'.format(result_path))
     print('Convert joined ds to exploded and save...')
-    ds_format.convert_joined_to_exploded(joined, with_inference, item_id_map).to_csv(result_path, sep='\t')
+    ds_format.convert_joined_to_exploded(joined).to_csv(result_path, sep='\t')
     print('Free memory...')
     del joined
     gc.collect()
@@ -94,6 +94,9 @@ if (args.parameter_string is not None) + (args.parameter_file is not None) + (ar
     print('ERROR. Exactly one of the following parameters must be provided: --parameter_string, --parameter_file, --load_model')
     sys.exit(1)
 
+if args.format == ds_format.JOINED:
+    tmp_dir = TemporaryDirectory()
+
 if args.load_model:
     print('Loading trained model from file: {}'.format(args.path))
     gru = GRU4Rec.loadmodel(args.path)
@@ -111,7 +114,6 @@ else:
     gru = GRU4Rec()
     gru.set_params(**gru4rec_params)
     if args.format == ds_format.JOINED:
-        tmp_dir = TemporaryDirectory()
         train_path = convert_joined_ds_and_store(args.path, 'train.tsv', tmp_dir)
     elif args.format == ds_format.EXPLODED:
         train_path = args.path
@@ -169,6 +171,9 @@ if args.inference is not None:
     if args.format != ds_format.JOINED:
         print('Must use inference only with --format (-f) set to joined, but use with {} instead'.format(args.format))
         sys.exit(1)
+    if args.test_against_items is not None:
+        print('Option --test_against_items during inference is not supported during inference, but it is assigned {}'.format(args.test_against_items))
+        sys.exit(1)
     input_dir = args.inference
     predictions_folder_name = 'predictions'
     predictions_dir = os.path.join(input_dir, predictions_folder_name)
@@ -178,14 +183,14 @@ if args.inference is not None:
         if f_name == predictions_folder_name:
             continue
         f_path = os.path.join(input_dir, f_name)
-        input_path = convert_joined_ds_and_store(f_path, f_name, tmp_dir, with_inference=True, item_id_map=gru.itemidmap)
+        input_path = convert_joined_ds_and_store(f_path, f_name, tmp_dir)
         output_path = os.path.join(predictions_dir, f_name)
         print('Loading inference data from path {}'.format(input_path))
         input_data = load_data(input_path, gru)
         c = args.measure[0]
         print('Starting inference (cut-off={}, using {} mode for tiebreaking)'.format(c, args.eval_type))
         t0 = time.time()
-        results = inference.infer_gpu(gru, input_data, items, batch_size=100, cut_off=c, mode=args.eval_type)
+        results = inference.infer_gpu(gru, input_data, batch_size=100, cut_off=c, mode=args.eval_type)
         t1 = time.time()
         print('Inference took {:.2f}s'.format(t1 - t0))
         print('Saving results to {}'.format(output_path))

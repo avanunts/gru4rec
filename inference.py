@@ -1,3 +1,4 @@
+import sys
 import numpy as np
 import pandas as pd
 from collections import OrderedDict
@@ -6,7 +7,47 @@ from theano import tensor as T
 from theano.sandbox.rng_mrg import MRG_RandomStreams as RandomStreams
 
 
-def infer_gpu(gru, input_data, items=None, session_key='SessionId', item_key='ItemId', time_key='Time', cut_off=20,
+class SessionsTraverser:
+    def __init__(self, data, batch_size, session_key='SessionId'):
+        if not np.all(np.diff(data[session_key].values) >= 0):
+            print('Sessions traverser error: {} column must be sorted'.format(session_key))
+            sys.exit(1)
+        num_sessions = data[session_key].nunique()
+        self.starts = np.zeros(num_sessions, dtype=np.int32)
+        _, session_sizes = np.unique(data['SessionId'], return_counts=True)
+        self.ends = session_sizes.cumsum() - 1  # inclusive ends
+        self.starts[1:] = self.ends[:-1] + 1
+        self.next_batch = np.zeros(batch_size, dtype=np.int32) - 1
+        self.next_batch[:min(batch_size, num_sessions)] = self.starts[:batch_size]
+        self.next_batch_termination = np.zeros(batch_size, dtype=np.int32) - 1
+        self.next_batch_termination[:min(batch_size, num_sessions)] = self.ends[:batch_size]
+        self.last_session = min(batch_size - 1, num_sessions - 1)
+        self.num_sessions = num_sessions
+
+    def get_next(self):
+        next_indices = self.next_batch.copy()
+        is_at_finish = np.array([False] * next_indices.shape[0])
+        for i in range(self.next_batch.shape[0]):
+            if self.next_batch[i] == -1:
+                continue
+            if self.next_batch[i] == self.next_batch_termination[i]:
+                is_at_finish[i] = True
+                if self.last_session == self.num_sessions - 1:
+                    self.next_batch[i] = -1
+                    self.next_batch_termination[i] = -1
+                else:
+                    self.last_session += 1
+                    self.next_batch[i] = self.starts[self.last_session]
+                    self.next_batch_termination[i] = self.ends[self.last_session]
+            else:
+                self.next_batch[i] += 1
+        return next_indices, is_at_finish
+
+    def empty(self):
+        return np.all(self.next_batch == -1)
+
+
+def infer_gpu(gru, input_data, session_key='SessionId', item_key='ItemId', time_key='Time', cut_off=20,
               batch_size=100, mode='standard'):
     '''
     Infers the GRU4Rec network quickly
@@ -18,8 +59,6 @@ def infer_gpu(gru, input_data, items=None, session_key='SessionId', item_key='It
     input_data : pandas.DataFrame
         Test data. It contains the transactions of the test set.It has one column for session IDs, one for item IDs and one for the timestamp of the events (unix timestamps).
         It must have a header. Column names are arbitrary, but must correspond to the keys you use in this function.
-    items : 1D list or None
-        The list of item ID that you want to compare the score of the relevant item to. If None, all items of the training set are used. Default value is None.
     session_key : string
         Header of the session ID column in the input file (default: 'SessionId')
     item_key : string
@@ -44,71 +83,37 @@ def infer_gpu(gru, input_data, items=None, session_key='SessionId', item_key='It
     X = T.ivector()
     Y = T.ivector()
     M = T.iscalar()
-    C = []
     yhat, H, updatesH = gru.symbolic_predict(X, Y, M, items, batch_size)
     if mode == 'tiebreaking': yhat += srng.uniform(size=yhat.shape) * 1e-10
 
-    infer = theano.function(inputs=[X, Y, M] + C, outputs=[yhat], updates=updatesH, allow_input_downcast=True,
+    infer = theano.function(inputs=[X, Y, M], outputs=[yhat], updates=updatesH, allow_input_downcast=True,
                                on_unused_input='ignore')
+
     input_data = pd.merge(input_data, pd.DataFrame({'ItemIdx': gru.itemidmap.values, item_key: gru.itemidmap.index}),
                           on=item_key, how='inner')
     input_data.sort_values([session_key, time_key, item_key], inplace=True)
-    test_data_items = input_data.ItemIdx.values
-    if items is not None:
-        item_idxs = gru.itemidmap[items]
-    n = 0
-    iters = np.arange(batch_size)
-    maxiter = iters.max()
+    traverser = SessionsTraverser(input_data, batch_size)
+    blank_idx = input_data.loc[0, 'ItemIdx']
     num_sessions = input_data[session_key].nunique()
-    offset_sessions = np.zeros(num_sessions + 1, dtype=np.int32)
-    offset_sessions[1:] = input_data.groupby(session_key).size().cumsum()
-    start = offset_sessions[iters]
-    end = offset_sessions[iters + 1]
-    finished = False
-    cidxs = []
+    session_idx = pd.Series(data=np.arange(num_sessions), index=input_data[session_key].unique())
     scores = np.zeros((num_sessions, gru.itemidmap.values.max() + 1))
-    while not finished:
-        minlen = (end - start).min()
-        out_idx = test_data_items[start]
-        for i in range(minlen - 1):
-            in_idx = out_idx
-            out_idx = test_data_items[start + i + 1]
-            if items is not None:
-                y = np.hstack([out_idx, item_idxs])
-            else:
-                y = out_idx
-            curr_scores = infer(in_idx, y, len(iters), *cidxs)
-            sub_ds = input_data.iloc[start]
-            to_infer = sub_ds['to_infer'].values
-            session_ids = sub_ds['SessionId'][to_infer].values
-            scores[session_ids] = curr_scores[to_infer]
-            n += len(iters)
-        start = start + minlen - 1
-        finished_mask = (end - start <= 1)
-        n_finished = finished_mask.sum()
-        iters[finished_mask] = maxiter + np.arange(1, n_finished + 1)
-        maxiter += n_finished
-        valid_mask = (iters < len(offset_sessions) - 1)
-        n_valid = valid_mask.sum()
-        if n_valid == 0:
-            finished = True
-            break
-        mask = finished_mask & valid_mask
-        sessions = iters[mask]
-        start[mask] = offset_sessions[sessions]
-        end[mask] = offset_sessions[sessions + 1]
-        iters = iters[valid_mask]
-        start = start[valid_mask]
-        end = end[valid_mask]
-        if valid_mask.any():
+    while not traverser.empty():
+        next_indices, is_at_finish = traverser.get_next()
+        blank_indices = np.where(next_indices < 0)[0]
+        next_indices[blank_indices] = blank_idx
+        in_idx = input_data.ItemIdx.values[next_indices]
+        curr_scores = infer(in_idx, None, None)
+        finished_session_ids = input_data.loc[next_indices[is_at_finish], 'SessionId'].values
+        finished_session_idxs = session_idx[finished_session_ids].values
+        finished_session_scores = [curr_scores[i] for i in np.where(is_at_finish)[0]]
+        scores[finished_session_idxs] = finished_session_scores
+        if is_at_finish.any():
             for i in range(len(H)):
                 tmp = H[i].get_value(borrow=True)
-                tmp[mask] = 0
-                tmp = tmp[valid_mask]
-                H[i].set_value(tmp, borrow=True)
+                tmp[np.where(is_at_finish)[0]] = 0
     indices = get_indices_from_scores(scores, cut_off)
-    ids = get_ids_from_indices(indices, gru.itemidmap)
-    return pd.DataFrame({'SessionId': np.arange(num_sessions), 'prediction': ids})
+    ids = get_ids_from_indices(indices, gru.itemidmap).tolist()
+    return pd.DataFrame({'SessionId': session_idx.index, 'prediction': ids})
 
 
 def get_indices_from_scores(scores, recom_size):
