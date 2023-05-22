@@ -83,7 +83,7 @@ def infer_gpu(gru, input_data, session_key='SessionId', item_key='ItemId', time_
     X = T.ivector()
     Y = T.ivector()
     M = T.iscalar()
-    yhat, H, updatesH = gru.symbolic_predict(X, Y, M, items, batch_size)
+    yhat, H, updatesH = gru.symbolic_predict(X, Y, M, None, batch_size)
     if mode == 'tiebreaking': yhat += srng.uniform(size=yhat.shape) * 1e-10
 
     infer = theano.function(inputs=[X, Y, M], outputs=[yhat], updates=updatesH, allow_input_downcast=True,
@@ -93,7 +93,7 @@ def infer_gpu(gru, input_data, session_key='SessionId', item_key='ItemId', time_
                           on=item_key, how='inner')
     input_data.sort_values([session_key, time_key, item_key], inplace=True)
     traverser = SessionsTraverser(input_data, batch_size)
-    blank_idx = input_data.loc[0, 'ItemIdx']
+    blank_idx = 0
     num_sessions = input_data[session_key].nunique()
     session_idx = pd.Series(data=np.arange(num_sessions), index=input_data[session_key].unique())
     scores = np.zeros((num_sessions, gru.itemidmap.values.max() + 1))
@@ -102,12 +102,12 @@ def infer_gpu(gru, input_data, session_key='SessionId', item_key='ItemId', time_
         blank_indices = np.where(next_indices < 0)[0]
         next_indices[blank_indices] = blank_idx
         in_idx = input_data.ItemIdx.values[next_indices]
-        curr_scores = infer(in_idx, None, None)
-        finished_session_ids = input_data.loc[next_indices[is_at_finish], 'SessionId'].values
-        finished_session_idxs = session_idx[finished_session_ids].values
-        finished_session_scores = [curr_scores[i] for i in np.where(is_at_finish)[0]]
-        scores[finished_session_idxs] = finished_session_scores
+        curr_scores = infer(in_idx, None, None)[0]
         if is_at_finish.any():
+            finished_session_ids = input_data.loc[next_indices[is_at_finish], 'SessionId'].values
+            finished_session_idxs = session_idx[finished_session_ids].values
+            finished_session_scores = [curr_scores[i] for i in np.where(is_at_finish)[0]]
+            scores[finished_session_idxs] = finished_session_scores
             for i in range(len(H)):
                 tmp = H[i].get_value(borrow=True)
                 tmp[np.where(is_at_finish)[0]] = 0

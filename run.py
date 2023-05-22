@@ -17,7 +17,7 @@ parser.add_argument('-pf', '--parameter_file', metavar='PARAM_PATH', type=str, h
 parser.add_argument('-l', '--load_model', action='store_true', help='Load an already trained model instead of training a model. Mutually exclusive with the -ps (--parameter_string) and the -pf (--parameter_file) arguments and one of the three must be provided.')
 parser.add_argument('-s', '--save_model', metavar='MODEL_PATH', type=str, help='Save the trained model to the MODEL_PATH. (Default: don\'t save model)')
 parser.add_argument('-t', '--test', metavar='TEST_PATH', type=str, nargs='+', help='Path to the test data set(s) located at TEST_PATH. Multiple test sets can be provided (separate with spaces). (Default: don\'t evaluate the model)')
-parser.add_argument('-i', '--inference', metavar='INFERENCE_PATH', type=str, help='Path to the folder with datasets to infer model located at INFERENCE_PATH.')
+parser.add_argument('-i', '--inference', metavar='INFERENCE_PATH', type=str, nargs='+', help='Paths to the datasets to infer model located at INFERENCE_PATH. Must be in format \'p1 p2 ... p2k-1 p2k\', where p2m-1 is input and p2m is output')
 parser.add_argument('-m', '--measure', metavar='AT', type=int, nargs='+', default=[20], help='Measure recall & MRR at the defined recommendation list length(s). Multiple values can be provided. (Default: 20)')
 parser.add_argument('-e', '--eval_type', metavar='EVAL_TYPE', choices=['standard', 'conservative', 'median', 'tiebreaking'], default='standard', help='Sets how to handle if multiple items in the ranked list have the same prediction score (which is usually due to saturation or an error). See the documentation of evaluate_gpu() in evaluation.py for further details. (Default: standard)')
 parser.add_argument('-ss', '--sample_store_size', metavar='SS', type=int, default=10000000, help='GRU4Rec uses a buffer for negative samples during training to maximize GPU utilization. This parameter sets the buffer length. Lower values require more frequent recomputation, higher values use more (GPU) memory. Unless you know what you are doing, you shouldn\'t mess with this parameter. (Default: 10000000)')
@@ -168,23 +168,20 @@ if args.inference is not None:
     if len(args.measure) != 1:
         print('Must use only one cutoff for inference, got list {}'.format(args.measure))
         sys.exit(1)
+    if len(args.inference) % 2 != 0:
+        print('--inference (-i) must contain even number of paths: 2i-1 for input and 2i for output')
+        sys.exit(1)
     if args.format != ds_format.JOINED:
         print('Must use inference only with --format (-f) set to joined, but use with {} instead'.format(args.format))
         sys.exit(1)
     if args.test_against_items is not None:
         print('Option --test_against_items during inference is not supported during inference, but it is assigned {}'.format(args.test_against_items))
         sys.exit(1)
-    input_dir = args.inference
-    predictions_folder_name = 'predictions'
-    predictions_dir = os.path.join(input_dir, predictions_folder_name)
-    if not os.path.exists(predictions_dir):
-        os.mkdir(predictions_dir)
-    for f_name in os.listdir(input_dir):
-        if f_name == predictions_folder_name:
-            continue
-        f_path = os.path.join(input_dir, f_name)
+    for i in range(int(len(args.inference) / 2)):
+        f_path = args.inference[2 * i]
+        f_name = os.path.basename(f_path)
         input_path = convert_joined_ds_and_store(f_path, f_name, tmp_dir)
-        output_path = os.path.join(predictions_dir, f_name)
+        output_path = args.inference[2 * i + 1]
         print('Loading inference data from path {}'.format(input_path))
         input_data = load_data(input_path, gru)
         c = args.measure[0]
