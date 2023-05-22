@@ -46,6 +46,9 @@ class SessionsTraverser:
     def empty(self):
         return np.all(self.next_batch == -1)
 
+    def sessions_processed_approx(self):
+        return self.last_session / self.num_sessions
+
 
 def infer_gpu(gru, input_data, session_key='SessionId', item_key='ItemId', time_key='Time', cut_off=20,
               batch_size=100, mode='standard'):
@@ -96,8 +99,9 @@ def infer_gpu(gru, input_data, session_key='SessionId', item_key='ItemId', time_
     blank_idx = 0
     num_sessions = input_data[session_key].nunique()
     session_idx = pd.Series(data=np.arange(num_sessions), index=input_data[session_key].unique())
-    scores = np.zeros((num_sessions, gru.itemidmap.values.max() + 1))
+    indices = np.zeros((num_sessions, cut_off), dtype=np.int32)
     while not traverser.empty():
+        print('Sessions processed approx: {}'.format(traverser.sessions_processed_approx()), flush=True)
         next_indices, is_at_finish = traverser.get_next()
         blank_indices = np.where(next_indices < 0)[0]
         next_indices[blank_indices] = blank_idx
@@ -107,11 +111,10 @@ def infer_gpu(gru, input_data, session_key='SessionId', item_key='ItemId', time_
             finished_session_ids = input_data.loc[next_indices[is_at_finish], 'SessionId'].values
             finished_session_idxs = session_idx[finished_session_ids].values
             finished_session_scores = [curr_scores[i] for i in np.where(is_at_finish)[0]]
-            scores[finished_session_idxs] = finished_session_scores
+            indices[finished_session_idxs] = get_indices_from_scores(finished_session_scores, cut_off)
             for i in range(len(H)):
                 tmp = H[i].get_value(borrow=True)
                 tmp[np.where(is_at_finish)[0]] = 0
-    indices = get_indices_from_scores(scores, cut_off)
     ids = get_ids_from_indices(indices, gru.itemidmap).tolist()
     return pd.DataFrame({'SessionId': session_idx.index, 'prediction': ids})
 
