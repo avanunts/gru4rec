@@ -50,7 +50,7 @@ class SessionsTraverser:
         return self.last_session / self.num_sessions
 
 
-def infer_gpu(gru, input_data, session_key='SessionId', item_key='ItemId', time_key='Time', cut_off=20,
+def infer_gpu_wrong(gru, input_data, session_key='SessionId', item_key='ItemId', time_key='Time', cut_off=20,
               batch_size=100, mode='standard'):
     '''
     Infers the GRU4Rec network quickly
@@ -100,10 +100,17 @@ def infer_gpu(gru, input_data, session_key='SessionId', item_key='ItemId', time_
     num_sessions = input_data[session_key].nunique()
     session_idx = pd.Series(data=np.arange(num_sessions), index=input_data[session_key].unique())
     indices = np.zeros((num_sessions, cut_off), dtype=np.int32)
+    # # debug
+    # prev_indices = []
+    # prev_not_finished = []
+    # n, rec, srr = 0, 0, 0
     while not traverser.empty():
         print('Sessions processed approx: {}'.format(traverser.sessions_processed_approx()), flush=True)
         next_indices, is_at_finish = traverser.get_next()
-        blank_indices = np.where(next_indices < 0)[0]
+        # n_add, rec_add, srr_add = eval_mrr_and_recall(input_data, next_indices, prev_indices, prev_not_finished)
+        # n += n_add; rec += rec_add; srr += srr_add
+        is_blank = next_indices < 0
+        blank_indices = np.where(is_blank)[0]
         next_indices[blank_indices] = blank_idx
         in_idx = input_data.ItemIdx.values[next_indices]
         curr_scores = infer(in_idx, None, None)[0]
@@ -115,7 +122,14 @@ def infer_gpu(gru, input_data, session_key='SessionId', item_key='ItemId', time_
             for i in range(len(H)):
                 tmp = H[i].get_value(borrow=True)
                 tmp[np.where(is_at_finish)[0]] = 0
+                H[i].set_value(tmp, borrow=True)
+        # # Debug code
+        # prev_not_finished = np.where(np.logical_not(is_at_finish) & np.logical_not(is_blank))[0].tolist()
+        # prev_indices = get_indices_from_scores([curr_scores[i] for i in prev_not_finished], cut_off)
+
     ids = get_ids_from_indices(indices, gru.itemidmap).tolist()
+    # print('MRR@{}: {}'.format(cut_off, srr / n))
+    # print('REC@{}: {}'.format(cut_off, rec / n))
     return pd.DataFrame({'SessionId': session_idx.index, 'prediction': ids})
 
 
@@ -127,3 +141,21 @@ def get_ids_from_indices(indices, itemidmap):
     ids = itemidmap.index.values
     vectorized = np.vectorize(lambda x: ids[x])
     return vectorized(indices)
+
+
+def eval_mrr_and_recall(input_data, next_indices, prev_indices, prev_not_finished):
+    input_indices = [next_indices[i] for i in prev_not_finished]
+    item_idxs = input_data.ItemIdx.values[input_indices]
+    n_add, rec_add, srr_add = len(prev_indices), 0, 0
+    rank = 0
+    for target, pred in zip(item_idxs, prev_indices):
+        for i in range(len(pred)):
+            if pred[i] == target:
+                rank = i + 1
+                break
+    if rank > 0:
+        rec_add += 1
+        srr_add += 1 / rank
+    return n_add, rec_add, srr_add
+
+

@@ -38,7 +38,7 @@ from collections import OrderedDict
 from gru4rec import GRU4Rec
 import ds_format
 import evaluation
-import inference
+import simple_inference
 import importlib.util
 import joblib
 os.chdir(orig_cwd)
@@ -188,8 +188,10 @@ if args.inference is not None:
         c = args.measure[0]
         print('Starting inference (cut-off={}, using {} mode for tiebreaking)'.format(c, args.eval_type))
         t0 = time.time()
-        results = inference.infer_gpu(gru, input_data, batch_size=args.inference_batch_size, cut_off=c, mode=args.eval_type)
+        recall, mrr, results = simple_inference.infer_gpu(gru, input_data, batch_size=args.inference_batch_size, cut_off=c, mode=args.eval_type)
         t1 = time.time()
+        print('REC@{}: {}'.format(c, recall))
+        print('MRR@{}: {}'.format(c, mrr))
         print('Inference took {:.2f}s'.format(t1 - t0))
         print('Saving results to {}'.format(output_path))
         t2 = time.time()
