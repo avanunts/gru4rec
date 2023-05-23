@@ -75,6 +75,7 @@ def infer_gpu(gru, test_data, items=None, session_key='SessionId', item_key='Ite
                                on_unused_input='ignore')
     test_data = pd.merge(test_data, pd.DataFrame({'ItemIdx': gru.itemidmap.values, item_key: gru.itemidmap.index}),
                          on=item_key, how='inner')
+    test_data = filter_sessions_of_length_1(test_data, session_key)
     test_data.sort_values([session_key, time_key, item_key], inplace=True)
     test_data_items = test_data.ItemIdx.values
     if items is not None:
@@ -89,7 +90,7 @@ def infer_gpu(gru, test_data, items=None, session_key='SessionId', item_key='Ite
     finished = False
     cidxs = []
     inference_sessions = np.zeros((test_data[session_key].nunique(), ), dtype=np.int32)
-    inference_recoms = np.zeros((test_data[session_key].nunique(), cut_off))
+    inference_recoms = np.zeros((test_data[session_key].nunique(), cut_off), dtype=np.int32)
     inference_targets = np.zeros((test_data[session_key].nunique(), ), dtype=np.int32)
     inference_processed = 0
     while not finished:
@@ -136,7 +137,7 @@ def infer_gpu(gru, test_data, items=None, session_key='SessionId', item_key='Ite
                 tmp = tmp[valid_mask]
                 H[i].set_value(tmp, borrow=True)
 
-    recom_ids = get_ids_from_indices(inference_recoms, gru.itemidmap)
+    recom_ids = get_ids_from_indices(inference_recoms, gru.itemidmap).tolist()
     target_ids = get_ids_from_indices(inference_targets, gru.itemidmap)
 
     return recall / n, mrr / n, pd.DataFrame({'SessionId': inference_sessions, 'target': target_ids, 'prediction': recom_ids})
@@ -146,3 +147,9 @@ def get_ids_from_indices(indices, itemidmap):
     ids = itemidmap.index.values
     vectorized = np.vectorize(lambda x: ids[x])
     return vectorized(indices)
+
+
+def filter_sessions_of_length_1(test_data, session_key):
+    session_id, size = np.unique(test_data[session_key].values, return_counts=True)
+    chosen_sessions = pd.DataFrame({session_key: session_id[size > 1]})
+    return pd.merge(test_data, chosen_sessions, on=session_key, how='inner')
