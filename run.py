@@ -38,7 +38,7 @@ from collections import OrderedDict
 from gru4rec import GRU4Rec
 import ds_format
 import evaluation
-import simple_inference
+import inference
 import importlib.util
 import joblib
 os.chdir(orig_cwd)
