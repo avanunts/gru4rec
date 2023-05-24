@@ -422,6 +422,37 @@ class GRU4Rec:
             else:
                 updates[fullP] = T.inc_subtensor(sparam, - delta)
         return updates
+
+    def update_states(self, X, H, drop_p_hidden=0.0, drop_p_embed=0.0):
+        if self.constrained_embedding:
+            raise NotImplementedError('Inference is not implemented for this case')
+        elif self.embedding:
+            Sx = self.E[X]
+            y = self.dropout(Sx, drop_p_embed)
+            H_new = []
+        else:
+            Sx = self.Wx[0][X]
+            vec = Sx + self.Bh[0]
+            rz = T.nnet.sigmoid(vec[:,self.layers[0]:] + T.dot(H[0], self.Wrz[0]))
+            h = self.hidden_activation(T.dot(H[0] * rz[:,:self.layers[0]], self.Wh[0]) + vec[:,:self.layers[0]])
+            z = rz[:,self.layers[0]:]
+            h = (1.0-z)*H[0] + z*h
+            h = self.dropout(h, drop_p_hidden)
+            y = h
+            H_new = [h]
+            start = 1
+        for i in range(start, len(self.layers)):
+            vec = T.dot(y, self.Wx[i]) + self.Bh[i]
+            rz = T.nnet.sigmoid(vec[:,self.layers[i]:] + T.dot(H[i], self.Wrz[i]))
+            h = self.hidden_activation(T.dot(H[i] * rz[:,:self.layers[i]], self.Wh[i]) + vec[:,:self.layers[i]])
+            z = rz[:,self.layers[i]:]
+            h = (1.0-z)*H[i] + z*h
+            h = self.dropout(h, drop_p_hidden)
+            y = h
+            H_new.append(h)
+        return H_new
+
+
     def model(self, X, H, M, R=None, Y=None, drop_p_hidden=0.0, drop_p_embed=0.0, predict=False):
         sparams, full_params, sidxs = [], [], []
         if (hasattr(self, 'ST')) and (Y is not None) and (not predict) and (self.n_sample > 0):
@@ -731,6 +762,36 @@ class GRU4Rec:
         for i in range(len(H)):
             updatesH[H[i]] = H_new[i]
         return yhat, H, updatesH
+
+    def symbolic_state(self, X, batch_size):
+        H = []
+        for i in range(len(self.layers)):
+            H.append(theano.shared(np.zeros((batch_size, self.layers[i]), dtype=theano.config.floatX)))
+        H_new = self.update_states(X, H)
+        updatesH = OrderedDict()
+        for i in range(len(H)):
+            updatesH[H[i]] = H_new[i]
+        return H, updatesH
+
+    def symbolic_predict_from_state(self, H_last, prefetch):
+        if prefetch is not None:
+            Sy = T.transpose(self.Wy.T[prefetch], axes=[0, 2, 1]) # batch_size * layer_size * prefetch_size
+            SBy = T.transpose(self.By[prefetch], axes=[0, 2, 1]) # batch_size * 1 * prefetch_size
+            y = (T.batched_dot(T.transpose(H_last[:, :, None], axes=[0, 2, 1]), Sy) + SBy).reshape(prefetch.shape)
+            if self.final_act == 'softmax_logit':
+                y = self.softmax(y)
+            else:
+                y = self.final_activation(y)
+            return y
+        else:
+            if self.final_act == 'softmax_logit':
+                y = self.softmax(T.dot(H_last, self.Wy.T) + self.By.flatten())
+            else:
+                y = T.dot(H_last, self.Wy.T) + self.By.flatten()
+                y = self.final_activation(y)
+            return y
+
+
     def savemodel(self, fname):
         #Get model parameters for GPU-CPU compatibility
         if self.embedding:
