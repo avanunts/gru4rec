@@ -1,5 +1,6 @@
 import argparse
 import os
+import json
 import shutil
 from tempfile import TemporaryDirectory
 import gc
@@ -18,6 +19,7 @@ parser.add_argument('-l', '--load_model', action='store_true', help='Load an alr
 parser.add_argument('-s', '--save_model', metavar='MODEL_PATH', type=str, help='Save the trained model to the MODEL_PATH. (Default: don\'t save model)')
 parser.add_argument('-t', '--test', metavar='TEST_PATH', type=str, nargs='+', help='Path to the test data set(s) located at TEST_PATH. Multiple test sets can be provided (separate with spaces). (Default: don\'t evaluate the model)')
 parser.add_argument('-i', '--inference', metavar='INFERENCE_PATH', type=str, nargs='+', help='Paths to the datasets to infer model located at INFERENCE_PATH. Must be in format \'p1 p2 ... p2k-1 p2k\', where p2m-1 is input and p2m is output')
+parser.add_argument('-pcp', '--prefetch_config_path', metavar='PREFETCH_CONFIG_PATH', type=str, help='Path to the prefetch config.  ')
 parser.add_argument('-ibs', '--inference_batch_size', metavar='INFERENCE_BATCH_SIZE', type=int, help='Batch size during inference.')
 parser.add_argument('-m', '--measure', metavar='AT', type=int, nargs='+', default=[20], help='Measure recall & MRR at the defined recommendation list length(s). Multiple values can be provided. (Default: 20)')
 parser.add_argument('-e', '--eval_type', metavar='EVAL_TYPE', choices=['standard', 'conservative', 'median', 'tiebreaking'], default='standard', help='Sets how to handle if multiple items in the ranked list have the same prediction score (which is usually due to saturation or an error). See the documentation of evaluate_gpu() in evaluation.py for further details. (Default: standard)')
@@ -39,6 +41,7 @@ from gru4rec import GRU4Rec
 import ds_format
 import evaluation
 import inference
+import prefetch
 import importlib.util
 import joblib
 os.chdir(orig_cwd)
@@ -54,6 +57,13 @@ def convert_joined_ds_and_store(joined_ds_path, f_name, tmp_dir):
     del joined
     gc.collect()
     return result_path
+
+
+def read_prefetch_config(path):
+    f = open(path, "r")
+    y = json.loads(f.read())
+    f.close()
+    return y
 
 
 def load_data(fname, gru):
@@ -178,20 +188,39 @@ if args.inference is not None:
     if args.test_against_items is not None:
         print('Option --test_against_items during inference is not supported during inference, but it is assigned {}'.format(args.test_against_items))
         sys.exit(1)
+    if args.prefetch_config_path is None:
+        print('Option --prefetch_config_path (pcp) must be assigned during inference, but it is none')
+        sys.exit(1)
+    prefetch_config = read_prefetch_config(args.prefetch_config_path)
     for i in range(int(len(args.inference) / 2)):
         f_path = args.inference[2 * i]
         f_name = os.path.basename(f_path)
         input_path = convert_joined_ds_and_store(f_path, f_name, tmp_dir)
         output_path = args.inference[2 * i + 1]
+        if not os.path.exists(prefetch_config['nn_base_path']):
+            print('''NN base doesn't exist for the model, build NN base...''')
+            t0 = time.time()
+            vectors = np.load(prefetch_config['vectors_path'])
+            vector_idx = pd.read_pickle(prefetch_config['vector_index_path'])
+            nn_per_query = prefetch_config['n_prefetch']
+            nn_base = prefetch.build_nn_base(gru.itemidmap, vectors, vector_idx, nn_per_query, item_key='ItemId')
+            np.save(prefetch_config['nn_base_path'], nn_base)
+            print('Saved nn base to {}, building with saving took {:.2f}s'.format(prefetch_config['nn_base_path'], t1 - t0))
+            del vectors, vector_idx, nn_per_query, nn_base
+            gc.collect()
         print('Loading inference data from path {}'.format(input_path))
         input_data = load_data(input_path, gru)
         c = args.measure[0]
+        print('Start building prefetch...')
+        t0 = time.time()
+        nn_base = np.load(prefetch_config['nn_base_path'])
+        prefetch_ds = prefetch.build_prefetch(gru.itemidmap, input_data, 'SessionId', 'ItemId', 'Time', 'Prefetch', nn_base, prefetch_config['n_prefetch'])
+        t1 = time.time()
+        print('End building prefetch, took {:.2f}s'.format(t1 - t0))
         print('Starting inference (cut-off={}, using {} mode for tiebreaking)'.format(c, args.eval_type))
         t0 = time.time()
-        recall, mrr, results = simple_inference.infer_gpu(gru, input_data, batch_size=args.inference_batch_size, cut_off=c, mode=args.eval_type)
+        results = inference.infer_gpu(gru, input_data, prefetch_ds, batch_size=args.inference_batch_size, cut_off=c)
         t1 = time.time()
-        print('REC@{}: {}'.format(c, recall))
-        print('MRR@{}: {}'.format(c, mrr))
         print('Inference took {:.2f}s'.format(t1 - t0))
         print('Saving results to {}'.format(output_path))
         t2 = time.time()
