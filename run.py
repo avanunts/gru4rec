@@ -201,7 +201,7 @@ if args.inference is not None:
             print('''NN base doesn't exist for the model, build NN base...''')
             t0 = time.time()
             vectors = np.load(prefetch_config['vectors_path'])
-            vector_idx = pd.read_pickle(prefetch_config['vector_index_path'])
+            vector_idx = np.load(prefetch_config['vector_index_path'])
             nn_per_query = prefetch_config['n_prefetch']
             nn_base = prefetch.build_nn_base(gru.itemidmap, vectors, vector_idx, nn_per_query, item_key='ItemId')
             np.save(prefetch_config['nn_base_path'], nn_base)

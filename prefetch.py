@@ -19,7 +19,7 @@ nn_map = {
 def build_nn_base(item_id_map, vectors, vector_idx, nn_per_query, item_key='ItemId'):
     merged_idx = pd.merge(
         pd.DataFrame({'ItemIdx': item_id_map.values, item_key: item_id_map.index}),
-        pd.DataFrame({'VectorIdx': vector_idx.values, item_key: vector_idx.index}),
+        pd.DataFrame({'VectorIdx': np.arange(len(vector_idx)), item_key: vector_idx}),
         on=item_key, how='left', validate='1:1'
     )
     if merged_idx['VectorIdx'].isna().sum() > 0:
