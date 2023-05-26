@@ -217,6 +217,8 @@ if args.inference is not None:
         prefetch_ds = prefetch.build_prefetch(gru.itemidmap, input_data, 'SessionId', 'ItemId', 'Time', 'Prefetch', nn_base, prefetch_config['n_prefetch'])
         t1 = time.time()
         print('End building prefetch, took {:.2f}s'.format(t1 - t0))
+        if prefetch_config['test_prefetch']:
+            prefetch.test_prefetch(gru.itemidmap, input_data, prefetch_ds)
         print('Starting inference (cut-off={}, using {} mode for tiebreaking)'.format(c, args.eval_type))
         t0 = time.time()
         results = inference.infer_gpu(gru, input_data, prefetch_ds, batch_size=args.inference_batch_size, cut_off=c)
