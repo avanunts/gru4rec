@@ -1,9 +1,6 @@
 import argparse
-import os
-import json
 import shutil
 from tempfile import TemporaryDirectory
-import gc
 
 class MyHelpFormatter(argparse.HelpFormatter):
     def __init__(self, *args, **kwargs):
@@ -20,7 +17,6 @@ parser.add_argument('-s', '--save_model', metavar='MODEL_PATH', type=str, help='
 parser.add_argument('-t', '--test', metavar='TEST_PATH', type=str, nargs='+', help='Path to the test data set(s) located at TEST_PATH. Multiple test sets can be provided (separate with spaces). (Default: don\'t evaluate the model)')
 parser.add_argument('-i', '--inference', metavar='INFERENCE_PATH', type=str, nargs='+', help='Paths to the datasets to infer model located at INFERENCE_PATH. Must be in format \'p1 p2 ... p2k-1 p2k\', where p2m-1 is input and p2m is output')
 parser.add_argument('-nnbp', '-nn_base_path', metavar='NN_BASE_PATH', type=str, help='Path to the nn base')
-parser.add_argument('-tp', '--test_prefetch', metavar='TEST_PREFETCH', type=bool, help='Count prefetch recall.', default=False)
 parser.add_argument('-np', '--n_prefetch', metavar='N_PREFETCH', type=int, help='Number of items in prefetch.')
 parser.add_argument('-ibs', '--inference_batch_size', metavar='INFERENCE_BATCH_SIZE', type=int, help='Batch size during inference.')
 parser.add_argument('-m', '--measure', metavar='AT', type=int, nargs='+', default=[20], help='Measure recall & MRR at the defined recommendation list length(s). Multiple values can be provided. (Default: 20)')
@@ -34,73 +30,23 @@ import os.path
 orig_cwd = os.getcwd()
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
 import numpy as np
-import pandas as pd
-import datetime as dt
 import sys
 import time
 from collections import OrderedDict
 from gru4rec import GRU4Rec
-import ds_format
+import data_util
 import evaluation
 import inference
 import prefetch
 import importlib.util
-import joblib
 os.chdir(orig_cwd)
 
-
-def convert_joined_ds_and_store(joined_ds_path, f_name, tmp_dir):
-    joined = pd.read_parquet(joined_ds_path)
-    result_path = os.path.join(tmp_dir.name, f_name)
-    print('Temporal path for exploded ds: {}...'.format(result_path))
-    print('Convert joined ds to exploded and save...')
-    ds_format.convert_joined_to_exploded(joined).to_csv(result_path, sep='\t')
-    print('Free memory...')
-    del joined
-    gc.collect()
-    return result_path
-
-
-def load_data(fname, gru):
-    if fname.endswith('.pickle'):
-        print('Loading data from pickle file: {}'.format(fname))
-        data = joblib.load(fname)
-        if gru.session_key not in data.columns:
-            print('ERROR. The column specified for session IDs "{}" is not in the data file ({})'.format(gru.session_key, fname))
-            print('The default column name is "SessionId", but you can specify otherwise by setting the `session_key` parameter of the model.')
-            sys.exit(1)
-        if gru.item_key not in data.columns:
-            print('ERROR. The column specified for item IDs "{}" is not in the data file ({})'.format(gru.item_key, fname))
-            print('The default column name is "ItemId", but you can specify otherwise by setting the `item_key` parameter of the model.')
-            sys.exit(1)
-        if gru.time_key not in data.columns:
-            print('ERROR. The column specified for time "{}" is not in the data file ({})'.format(gru.time_key, fname))
-            print('The default column name is "Time", but you can specify otherwise by setting the `time_key` parameter of the model.')
-            sys.exit(1)
-    else:
-        with open(fname, 'rt') as f:
-            header = f.readline().strip().split('\t')
-        if gru.session_key not in header:
-            print('ERROR. The column specified for session IDs "{}" is not in the data file ({})'.format(gru.session_key, fname))
-            print('The default column name is "SessionId", but you can specify otherwise by setting the `session_key` parameter of the model.')
-            sys.exit(1)
-        if gru.item_key not in header:
-            print('ERROR. The colmn specified for item IDs "{}" is not in the data file ({})'.format(gru.item_key, fname))
-            print('The default column name is "ItemId", but you can specify otherwise by setting the `item_key` parameter of the model.')
-            sys.exit(1)
-        if gru.time_key not in header:
-            print('ERROR. The column specified for time "{}" is not in the data file ({})'.format(gru.time_key, fname))
-            print('The default column name is "Time", but you can specify otherwise by setting the `time_key` parameter of the model.')
-            sys.exit(1)
-        print('Loading data from TAB separated file: {}'.format(fname))
-        data = pd.read_csv(fname, sep='\t', usecols=[gru.session_key, gru.item_key, gru.time_key], dtype={gru.session_key:'int32', gru.item_key:np.str})
-    return data
 
 if (args.parameter_string is not None) + (args.parameter_file is not None) + (args.load_model) != 1:
     print('ERROR. Exactly one of the following parameters must be provided: --parameter_string, --parameter_file, --load_model')
     sys.exit(1)
 
-if args.format == ds_format.JOINED:
+if args.format == data_util.JOINED:
     tmp_dir = TemporaryDirectory()
 
 if args.load_model:
@@ -119,15 +65,15 @@ else:
         gru4rec_params = OrderedDict([x.split('=') for x in args.parameter_string.split(',')])
     gru = GRU4Rec()
     gru.set_params(**gru4rec_params)
-    if args.format == ds_format.JOINED:
-        train_path = convert_joined_ds_and_store(args.path, 'train.tsv', tmp_dir)
-    elif args.format == ds_format.EXPLODED:
+    if args.format == data_util.JOINED:
+        train_path = data_util.convert_joined_ds_and_store(args.path, 'train.tsv', tmp_dir)
+    elif args.format == data_util.EXPLODED:
         train_path = args.path
     else:
-        print('--format (-f) option must be one of two: {}/{}, but it is {}.'.format(ds_format.JOINED, ds_format.EXPLODED, args.format))
+        print('--format (-f) option must be one of two: {}/{}, but it is {}.'.format(data_util.JOINED, data_util.EXPLODED, args.format))
         sys.exit(1)
     print('Loading training data...')
-    data = load_data(train_path, gru)
+    data = data_util.load_data(train_path, gru)
     store_type = 'cpu' if args.sample_store_on_cpu else 'gpu'
     if store_type == 'cpu':
         print('WARNING! The sample store is set to be on the CPU. This will make training significantly slower on the GPU.')
@@ -156,12 +102,12 @@ if (args.test is not None) + (args.inference is not None) > 1:
 
 if args.test is not None:
     for test_file in args.test:
-        if args.format == ds_format.JOINED:
-            test_path = convert_joined_ds_and_store(test_file, 'test.tsv', tmp_dir)
+        if args.format == data_util.JOINED:
+            test_path = data_util.convert_joined_ds_and_store(test_file, 'test.tsv', tmp_dir)
         else:
             test_path = test_file
         print('Loading test data...')
-        test_data = load_data(test_path, gru)
+        test_data = data_util.load_data(test_path, gru)
         for c in args.measure:
             print('Starting evaluation (cut-off={}, using {} mode for tiebreaking)'.format(c, args.eval_type))
             t0 = time.time()
@@ -177,7 +123,7 @@ if args.inference is not None:
     if len(args.inference) % 2 != 0:
         print('--inference (-i) must contain even number of paths: 2i-1 for input and 2i for output')
         sys.exit(1)
-    if args.format != ds_format.JOINED:
+    if args.format != data_util.JOINED:
         print('Must use inference only with --format (-f) set to joined, but use with {} instead'.format(args.format))
         sys.exit(1)
     if args.test_against_items is not None:
@@ -192,10 +138,10 @@ if args.inference is not None:
     for i in range(int(len(args.inference) / 2)):
         f_path = args.inference[2 * i]
         f_name = os.path.basename(f_path)
-        input_path = convert_joined_ds_and_store(f_path, f_name, tmp_dir)
+        input_path = data_util.convert_joined_ds_and_store(f_path, f_name, tmp_dir)
         output_path = args.inference[2 * i + 1]
         print('Loading inference data from path {}'.format(input_path))
-        input_data = load_data(input_path, gru)
+        input_data = data_util.load_data(input_path, gru)
         c = args.measure[0]
         print('Start building prefetch...')
         t0 = time.time()
@@ -203,8 +149,6 @@ if args.inference is not None:
         prefetch_ds = prefetch.build_prefetch(gru.itemidmap, input_data, 'SessionId', 'ItemId', 'Time', 'Prefetch', nn_base, args.n_prefetch)
         t1 = time.time()
         print('End building prefetch, took {:.2f}s'.format(t1 - t0))
-        if args.test_prefetch:
-            prefetch.test_prefetch(gru.itemidmap, input_data, prefetch_ds)
         print('Starting inference (cut-off={}, using {} mode for tiebreaking)'.format(c, args.eval_type))
         t0 = time.time()
         results = inference.infer_gpu(gru, input_data, prefetch_ds, batch_size=args.inference_batch_size, cut_off=c)
@@ -216,5 +160,5 @@ if args.inference is not None:
         t3 = time.time()
         print('Saving took {:.2f}s'.format(t3 - t2))
 
-if args.format == ds_format.JOINED:
+if args.format == data_util.JOINED:
     tmp_dir.cleanup()

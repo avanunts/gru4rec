@@ -11,7 +11,7 @@ parser.add_argument('path', type=str, help='Path to the saved model')
 parser.add_argument('-nnbp', '--nn_base_path', type=str, help='Path to the file where to save nn base')
 parser.add_argument('-vp', '--vectors_path', type=str, help='Path to the vectors numpy 2d array')
 parser.add_argument('-vip', '--vector_index_path', type=str, help='Path to the vector idx')
-parser.add_argument('nnpq', '--nn_per_query', type=int, help='How many nearest neighbours to save in the base')
+parser.add_argument('-nnpq', '--nn_per_query', type=int, help='How many nearest neighbours to save in the base')
 args = parser.parse_args()
 
 print('Loading trained model from file: {}'.format(args.path))
