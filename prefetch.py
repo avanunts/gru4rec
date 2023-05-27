@@ -60,11 +60,11 @@ def build_prefetch(item_id_map, input_data, session_key, item_key, time_key, pre
 
 def test_prefetch(item_id_map, input_data, prefetch_ds, session_key, item_key, time_key, prefetch_key):
     df = pd.merge(input_data, pd.DataFrame({'ItemIdx': item_id_map.values, item_key: item_id_map.index}), on=item_key, how='inner')
-    session_id, session_size = np.unique(input_data[session_key].values)
+    session_id, session_size = np.unique(input_data[session_key].values, return_counts=True)
     max_time = pd.DataFrame({session_key: session_id, time_key: session_size - 1})
     df = pd.merge(df, max_time, on=[session_key, time_key], how='inner')[[session_key, 'ItemIdx']]
     recall = pd.merge(df, prefetch_ds, on=[session_key], how='inner').apply(lambda x: x['ItemIdx'] in x[prefetch_key], axis=1)
-    print('TEST PREFETCH: total sessions {}, recall {}'.format(recall.shape[0], recall[prefetch_key].values.mean()))
+    print('TEST PREFETCH: total sessions {}, recall {}'.format(recall.shape[0], recall.values.mean()))
 
 def get_prefetch_values(nn_base, keys, n_prefetch):
     if not len(keys) in nn_map.keys():

@@ -31,7 +31,7 @@ print('Loading nn_base from path {}'.format(args.nn_base_path))
 nn_base = np.load(args.nn_base_path)
 
 prefetch_ds = prefetch.build_prefetch(gru.itemidmap, input_data, 'SessionId', 'ItemId', 'Time', 'Prefetch', nn_base, args.n_prefetch)
-prefetch.test_prefetch(gru.itemidmap, input_data, prefetch_ds)
+prefetch.test_prefetch(gru.itemidmap, input_data, prefetch_ds, 'SessionId', 'ItemId', 'Time', 'Prefetch')
 
 tmp_dir.cleanup()
 
