@@ -45,7 +45,7 @@ def infer_gpu(gru, test_data, prefetch_ds, session_key='SessionId', item_key='It
         (Recall@N, MRR@N)
 
     '''
-    validate_data(test_data, prefetch_ds)
+    validate_data(test_data, prefetch_ds, session_key, prefetch_key)
     if gru.error_during_train: raise Exception
     print('Measuring Recall@{} and MRR@{}'.format(cut_off, cut_off))
     X = T.ivector()
@@ -54,13 +54,12 @@ def infer_gpu(gru, test_data, prefetch_ds, session_key='SessionId', item_key='It
 
     eval_h = theano.function(inputs=[X] + C, updates=updatesH, allow_input_downcast=True)
 
-    H_last = T.imatrix()
+    H_last = T.fmatrix()
     prefetch = T.imatrix()
     yhat = gru.symbolic_predict_from_state(H_last, prefetch)
     prefetch_recoms = yhat.argsort()[:, ::-1][:, :cut_off]
-    recoms = prefetch[np.arange(prefetch.shape[0]), prefetch_recoms]
 
-    eval_recoms = theano.function(inputs=[H_last, prefetch] + C, outputs=[recoms])
+    eval_recoms = theano.function(inputs=[H_last, prefetch] + C, outputs=[prefetch_recoms])
 
 
     test_data = pd.merge(test_data, pd.DataFrame({'ItemIdx': gru.itemidmap.values, item_key: gru.itemidmap.index}),
@@ -94,8 +93,9 @@ def infer_gpu(gru, test_data, prefetch_ds, session_key='SessionId', item_key='It
         inference_sessions[inference_processed:inference_processed + n_finished] = to_infer_sessions
         prefetch_item_idxs = np.stack(prefetch_ds[prefetch_key].values[to_infer_sessions])
         H_last = H[-1].get_value(borrow=False)[finished_mask]
-        recoms = eval_recoms(H_last, prefetch_item_idxs, *cidxs)
-        inference_recoms[inference_processed:inference_processed + n_finished] = recoms
+        new_prefetch_recoms = eval_recoms(H_last, prefetch_item_idxs.astype(np.int32), *cidxs)[0]
+        for i in range(n_finished):
+            inference_recoms[inference_processed + i] = prefetch_item_idxs[i][new_prefetch_recoms[i]]
         inference_processed += n_finished
         iters[finished_mask] = maxiter + np.arange(1, n_finished + 1)
         maxiter += n_finished

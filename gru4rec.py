@@ -775,9 +775,9 @@ class GRU4Rec:
 
     def symbolic_predict_from_state(self, H_last, prefetch):
         if prefetch is not None:
-            Sy = T.transpose(self.Wy.T[prefetch], axes=[0, 2, 1]) # batch_size * layer_size * prefetch_size
-            SBy = T.transpose(self.By[prefetch], axes=[0, 2, 1]) # batch_size * 1 * prefetch_size
-            y = (T.batched_dot(T.transpose(H_last[:, :, None], axes=[0, 2, 1]), Sy) + SBy).reshape(prefetch.shape)
+            Sy = self.Wy[prefetch]
+            SBy = self.By[prefetch]
+            y = (T.batched_dot(Sy, H_last[:, :, None]) + SBy).reshape(prefetch.shape)
             if self.final_act == 'softmax_logit':
                 y = self.softmax(y)
             else:
