@@ -6,7 +6,7 @@ import joblib
 import pandas as pd
 import numpy as np
 
-JOINED = 'joined'  # format is {'SessionId': [0, 1], 'items': [['aa', 'bb'], ['cc']]} SessionId must be unique
+JOINED = 'joined'  # format is {'items': [['aa', 'bb'], ['cc']]} SessionId must be unique
 EXPLODED = 'exploded'  # format is {'SessionId': [0, 0, 0, 1, 1], 'Time': [0, 1, 2, 0, 1], 'ItemId': ['aa', 'bb', 'cc', 'dd', 'ee']}
 
 
@@ -46,8 +46,12 @@ def load_data(fname, gru):
     return data
 
 
-def convert_joined_ds_and_store(joined_ds_path, f_name, tmp_dir):
-    joined = pd.read_parquet(joined_ds_path)
+def add_idle_item(joined_ds, append_item_id):
+    joined_ds['items'] = joined_ds['items'].apply(lambda x: np.append(x, append_item_id))
+
+
+def convert_joined_ds_and_store(joined, f_name, tmp_dir):
+    joined['SessionId'] = np.arange(len(joined))
     result_path = os.path.join(tmp_dir.name, f_name)
     print('Temporal path for exploded ds: {}...'.format(result_path))
     print('Convert joined ds to exploded and save...')

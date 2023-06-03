@@ -57,9 +57,8 @@ def infer_gpu(gru, test_data, prefetch_ds, session_key='SessionId', item_key='It
     H_last = T.fmatrix()
     prefetch = T.imatrix()
     yhat = gru.symbolic_predict_from_state(H_last, prefetch)
-    prefetch_recoms = yhat.argsort()[:, ::-1][:, :cut_off]
 
-    eval_recoms = theano.function(inputs=[H_last, prefetch] + C, outputs=[prefetch_recoms])
+    eval_recoms = theano.function(inputs=[H_last, prefetch] + C, outputs=[yhat])
 
 
     test_data = pd.merge(test_data, pd.DataFrame({'ItemIdx': gru.itemidmap.values, item_key: gru.itemidmap.index}),
@@ -93,9 +92,9 @@ def infer_gpu(gru, test_data, prefetch_ds, session_key='SessionId', item_key='It
         inference_sessions[inference_processed:inference_processed + n_finished] = to_infer_sessions
         prefetch_item_idxs = np.stack(prefetch_ds[prefetch_key].values[to_infer_sessions])
         H_last = H[-1].get_value(borrow=False)[finished_mask]
-        new_prefetch_recoms = eval_recoms(H_last, prefetch_item_idxs.astype(np.int32), *cidxs)[0]
+        prefetch_scores = eval_recoms(H_last, prefetch_item_idxs.astype(np.int32), *cidxs)[0]
         for i in range(n_finished):
-            inference_recoms[inference_processed + i] = prefetch_item_idxs[i][new_prefetch_recoms[i]]
+            inference_recoms[inference_processed + i] = get_prefetch_recoms(prefetch_item_idxs[i], prefetch_scores[i])
         inference_processed += n_finished
         iters[finished_mask] = maxiter + np.arange(1, n_finished + 1)
         maxiter += n_finished
@@ -152,9 +151,18 @@ def validate_data(test_data, prefetch_ds, session_key, prefetch_key):
         print('prefetch SessionIds must be of a form 0, ..., num_sessions - 1')
         sys.exit(1)
     prefetch_lens = np.unique(prefetch_ds[prefetch_key].apply(len).values)
-    if not len(prefetch_lens) == 1:
-        print('Prefetch must be of equal size for all sessions')
-        sys.exit(1)
-    if not prefetch_lens[0] >= 500:
+    if not prefetch_lens.min() < 500:
         print('Prefetch len must be at least 500')
         sys.exit(1)
+
+
+'''
+idxs 1d numpy array dtype=np.int32
+scores 1d numpy array dtype=np.float32 
+lengths must coincide 
+idxs might contain equal indices, so we want to output top100 unique idxs by their scores
+'''
+def get_prefetch_recoms(idxs, scores):
+    unique_idxs, order = np.unique(idxs, return_index=True)
+    unique_scores = scores[order]
+    return unique_idxs[unique_scores.argsort()[::-1][:n_recoms]]

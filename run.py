@@ -15,8 +15,8 @@ parser.add_argument('-pf', '--parameter_file', metavar='PARAM_PATH', type=str, h
 parser.add_argument('-l', '--load_model', action='store_true', help='Load an already trained model instead of training a model. Mutually exclusive with the -ps (--parameter_string) and the -pf (--parameter_file) arguments and one of the three must be provided.')
 parser.add_argument('-s', '--save_model', metavar='MODEL_PATH', type=str, help='Save the trained model to the MODEL_PATH. (Default: don\'t save model)')
 parser.add_argument('-t', '--test', metavar='TEST_PATH', type=str, nargs='+', help='Path to the test data set(s) located at TEST_PATH. Multiple test sets can be provided (separate with spaces). (Default: don\'t evaluate the model)')
-parser.add_argument('-i', '--inference', metavar='INFERENCE_PATH', type=str, nargs='+', help='Paths to the datasets to infer model located at INFERENCE_PATH. Must be in format \'p1 p2 ... p2k-1 p2k\', where p2m-1 is input and p2m is output')
-parser.add_argument('-nnbp', '--nn_base_path', metavar='NN_BASE_PATH', type=str, help='Path to the nn base')
+parser.add_argument('-i', '--inference', metavar='INFERENCE_PATH', type=str, nargs='+', help='Two paths: first path to the dataset to infer model and the second path to store the output.')
+parser.add_argument('-nnbp', '--nn_base_path', metavar='NN_BASE_PATH', type=str, nargs='+', help='Two paths: to the nn base (i -> nns of i) and to the nn base index (parquet with column id)')
 parser.add_argument('-np', '--n_prefetch', metavar='N_PREFETCH', type=int, help='Number of items in prefetch.')
 parser.add_argument('-ibs', '--inference_batch_size', metavar='INFERENCE_BATCH_SIZE', type=int, help='Batch size during inference.')
 parser.add_argument('-m', '--measure', metavar='AT', type=int, nargs='+', default=[20], help='Measure recall & MRR at the defined recommendation list length(s). Multiple values can be provided. (Default: 20)')
@@ -30,6 +30,7 @@ import os.path
 orig_cwd = os.getcwd()
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
 import numpy as np
+import pandas as pd
 import sys
 import time
 from collections import OrderedDict
@@ -66,7 +67,11 @@ else:
     gru = GRU4Rec()
     gru.set_params(**gru4rec_params)
     if args.format == data_util.JOINED:
-        train_path = data_util.convert_joined_ds_and_store(args.path, 'train.tsv', tmp_dir)
+        joined_train = pd.read_parquet(args.path)
+        if args.inference is not None:
+            joined_test = pd.read_parquet(args.inference[0])
+            joined_train = pd.concat([joined_train, joined_test])
+        train_path = data_util.convert_joined_ds_and_store(joined_train, 'train.tsv', tmp_dir)
     elif args.format == data_util.EXPLODED:
         train_path = args.path
     else:
@@ -103,7 +108,8 @@ if (args.test is not None) + (args.inference is not None) > 1:
 if args.test is not None:
     for test_file in args.test:
         if args.format == data_util.JOINED:
-            test_path = data_util.convert_joined_ds_and_store(test_file, 'test.tsv', tmp_dir)
+            joined_test = pd.read_parquet(test_file)
+            test_path = data_util.convert_joined_ds_and_store(joined_test, 'test.tsv', tmp_dir)
         else:
             test_path = test_file
         print('Loading test data...')
@@ -120,8 +126,8 @@ if args.inference is not None:
     if len(args.measure) != 1:
         print('Must use only one cutoff for inference, got list {}'.format(args.measure))
         sys.exit(1)
-    if len(args.inference) % 2 != 0:
-        print('--inference (-i) must contain even number of paths: 2i-1 for input and 2i for output')
+    if len(args.inference) != 2:
+        print('--inference (-i) must contain two paths: first for input and second for output')
         sys.exit(1)
     if args.format != data_util.JOINED:
         print('Must use inference only with --format (-f) set to joined, but use with {} instead'.format(args.format))
@@ -132,33 +138,39 @@ if args.inference is not None:
     if args.nn_base_path is None or args.n_prefetch is None:
         print('Options --nn_base_path (-nnbp) and --n_prefetch (-np) must be assigned during inference, but at least one of them is None')
         sys.exit(1)
-    if not os.path.exists(args.nn_base_path):
+    if len(args.nn_base_path) != 2:
+        print('Option --nn_base path must contain two paths: to the nn_base and to the nn_base index')
+        sys.exit(1)
+    if not os.path.exists(args.nn_base_path[0]) or not os.path.exists(args.nn_base_path[1]):
         print('''NN base doesn't exist for the model, please build nn base with build_nn_base.py first''')
         sys.exit(1)
-    for i in range(int(len(args.inference) / 2)):
-        f_path = args.inference[2 * i]
-        f_name = os.path.basename(f_path)
-        input_path = data_util.convert_joined_ds_and_store(f_path, f_name, tmp_dir)
-        output_path = args.inference[2 * i + 1]
-        print('Loading inference data from path {}'.format(input_path))
-        input_data = data_util.load_data(input_path, gru)
-        c = args.measure[0]
-        print('Start building prefetch...')
-        t0 = time.time()
-        nn_base = np.load(args.nn_base_path)
-        prefetch_ds = prefetch.build_prefetch(gru.itemidmap, input_data, 'SessionId', 'ItemId', 'Time', 'Prefetch', nn_base, args.n_prefetch)
-        t1 = time.time()
-        print('End building prefetch, took {:.2f}s'.format(t1 - t0))
-        print('Starting inference (cut-off={}, using {} mode for tiebreaking)'.format(c, args.eval_type))
-        t0 = time.time()
-        results = inference.infer_gpu(gru, input_data, prefetch_ds, batch_size=args.inference_batch_size, cut_off=c)
-        t1 = time.time()
-        print('Inference took {:.2f}s'.format(t1 - t0))
-        print('Saving results to {}'.format(output_path))
-        t2 = time.time()
-        results.to_parquet(output_path, engine='pyarrow')
-        t3 = time.time()
-        print('Saving took {:.2f}s'.format(t3 - t2))
+    joined_input_path = args.inference[0]
+    joined_input_fname = os.path.basename(joined_input_path)
+    some_item_id = gru.itemidmap.index[0]
+    joined_input = pd.read_parquet(joined_input_path)
+    data_util.add_idle_item(joined_input, some_item_id)
+    input_path = data_util.convert_joined_ds_and_store(joined_input, joined_input_fname, tmp_dir)
+    output_path = args.inference[1]
+    print('Loading inference data from path {}'.format(input_path))
+    input_data = data_util.load_data(input_path, gru)
+    c = args.measure[0]
+    print('Start building prefetch...')
+    t0 = time.time()
+    nn_base = np.load(args.nn_base_path[0])
+    nn_base_idx = pd.read_parquet(args.nn_base_path[1]).id.values.tolist()
+    prefetch_ds = prefetch.build_prefetch(gru.itemidmap, input_data, nn_base, nn_base_idx, args.n_prefetch)
+    t1 = time.time()
+    print('End building prefetch, took {:.2f}s'.format(t1 - t0))
+    print('Starting inference (cut-off={}, using {} mode for tiebreaking)'.format(c, args.eval_type))
+    t0 = time.time()
+    results = inference.infer_gpu(gru, input_data, prefetch_ds, batch_size=args.inference_batch_size, cut_off=c)
+    t1 = time.time()
+    print('Inference took {:.2f}s'.format(t1 - t0))
+    print('Saving results to {}'.format(output_path))
+    t2 = time.time()
+    results.to_parquet(output_path, engine='pyarrow')
+    t3 = time.time()
+    print('Saving took {:.2f}s'.format(t3 - t2))
 
 if args.format == data_util.JOINED:
     tmp_dir.cleanup()
