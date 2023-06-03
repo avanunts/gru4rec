@@ -94,7 +94,7 @@ def infer_gpu(gru, test_data, prefetch_ds, session_key='SessionId', item_key='It
         H_last = H[-1].get_value(borrow=False)[finished_mask]
         prefetch_scores = eval_recoms(H_last, prefetch_item_idxs.astype(np.int32), *cidxs)[0]
         for i in range(n_finished):
-            inference_recoms[inference_processed + i] = get_prefetch_recoms(prefetch_item_idxs[i], prefetch_scores[i])
+            inference_recoms[inference_processed + i] = get_prefetch_recoms(prefetch_item_idxs[i], prefetch_scores[i], cut_off)
         inference_processed += n_finished
         iters[finished_mask] = maxiter + np.arange(1, n_finished + 1)
         maxiter += n_finished
@@ -162,7 +162,7 @@ scores 1d numpy array dtype=np.float32
 lengths must coincide 
 idxs might contain equal indices, so we want to output top100 unique idxs by their scores
 '''
-def get_prefetch_recoms(idxs, scores):
+def get_prefetch_recoms(idxs, scores, n_recoms):
     unique_idxs, order = np.unique(idxs, return_index=True)
     unique_scores = scores[order]
     return unique_idxs[unique_scores.argsort()[::-1][:n_recoms]]
