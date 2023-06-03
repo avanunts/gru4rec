@@ -151,7 +151,7 @@ def validate_data(test_data, prefetch_ds, session_key, prefetch_key):
         print('prefetch SessionIds must be of a form 0, ..., num_sessions - 1')
         sys.exit(1)
     prefetch_lens = prefetch_ds[prefetch_key].apply(len).values
-    if not prefetch_lens.min() < 500:
+    if prefetch_lens.min() < 500:
         print('Prefetch len must be at least 500')
         sys.exit(1)
 
