@@ -31,7 +31,7 @@ print('Loading inference data from path {}'.format(input_path))
 input_data = data_util.load_data(input_path, gru)
 
 print('Loading nn_base from path {}'.format(args.nn_base_path[0]))
-nn_base = np.load(args.nn_base_path)
+nn_base = np.load(args.nn_base_path[0])
 print('Loading nn_base idx from path {}'.format(args.nn_base_path[1]))
 nn_base_idx = pd.read_parquet(args.nn_base_path[1]).id.values.tolist()
 
