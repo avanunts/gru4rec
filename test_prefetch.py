@@ -25,7 +25,7 @@ tmp_dir = TemporaryDirectory()
 f_path = args.inference
 f_name = os.path.basename(f_path)
 joined_input = pd.read_parquet(f_path)
-joined_input['items'] = joined_input.apply(lambda x: np.append(x['items'], x['next_item']))
+joined_input['items'] = joined_input.apply(lambda x: np.append(x['items'], x['next_item']), axis=1)
 input_path = data_util.convert_joined_ds_and_store(joined_input, f_name, tmp_dir)
 print('Loading inference data from path {}'.format(input_path))
 input_data = data_util.load_data(input_path, gru)
