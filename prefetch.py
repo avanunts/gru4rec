@@ -140,8 +140,8 @@ def align_nn_base(item_id_map, nn_base, nn_base_idx):
         pd.DataFrame({'nn_item_idx': np.arange(len(nn_base_idx)), 'item_id': nn_base_idx}),
         on='item_id', how='outer'
     )
-    gru_idx_to_nn_idx = idx_map.dropna().sort_values(by='gru_item_idx').nn_item_idx.values
-    nn_idx_to_gru_idx = idx_map.fillna({'gru_item_idx': 0}).sort_values(by='nn_item_idx').gru_item_idx.values
+    gru_idx_to_nn_idx = idx_map.dropna().sort_values(by='gru_item_idx').nn_item_idx.values.astype(int)
+    nn_idx_to_gru_idx = idx_map.fillna({'gru_item_idx': 0}).sort_values(by='nn_item_idx').gru_item_idx.values.astype(int)
     aligned_nn_base = np.zeros((len(gru_idx_to_nn_idx), nn_base.shape[1]))
     for gru_idx in range(len(gru_idx_to_nn_idx)):
         nn_idxs = nn_base[gru_idx_to_nn_idx[gru_idx]]
