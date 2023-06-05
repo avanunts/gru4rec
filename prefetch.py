@@ -140,10 +140,20 @@ def align_nn_base(item_id_map, nn_base, nn_base_idx):
         pd.DataFrame({'nn_item_idx': np.arange(len(nn_base_idx)), 'item_id': nn_base_idx}),
         on='item_id', how='outer'
     )
-    gru_idx_to_nn_idx = idx_map.dropna().sort_values(by='gru_item_idx').nn_item_idx.values.astype(int)
-    nn_idx_to_gru_idx = idx_map.fillna({'gru_item_idx': 0}).sort_values(by='nn_item_idx').gru_item_idx.values.astype(int)
-    aligned_nn_base = np.zeros((len(gru_idx_to_nn_idx), nn_base.shape[1]))
+    gru_idx_to_nn_idx = idx_map.fillna({'nn_item_idx': -1}).dropna().sort_values(by='gru_item_idx').nn_item_idx.values.astype(int)
+    nn_idx_to_gru_idx = idx_map.fillna({'gru_item_idx': 0}).dropna().sort_values(by='nn_item_idx').gru_item_idx.values.astype(int)
+    default_neighbours = get_default_neighbours(nn_base)
+    aligned_nn_base = np.zeros((len(gru_idx_to_nn_idx), nn_base.shape[1]), dtype=np.int32)
     for gru_idx in range(len(gru_idx_to_nn_idx)):
-        nn_idxs = nn_base[gru_idx_to_nn_idx[gru_idx]]
-        aligned_nn_base[gru_idx] = nn_idx_to_gru_idx[nn_idxs]
+        nn_idx = gru_idx_to_nn_idx[gru_idx]
+        if nn_idx == -1:
+            base_idxs = default_neighbours
+        else:
+            base_idxs = nn_base[nn_idx]
+        aligned_nn_base[gru_idx] = nn_idx_to_gru_idx[base_idxs]
     return aligned_nn_base
+
+
+def get_default_neighbours(nn_base):
+    neighbour, popularity = np.unique(np.hstack(nn_base), return_counts=True)
+    return neighbour[np.argsort(popularity)[::-1]][:nn_base.shape[1]]
