@@ -1,6 +1,6 @@
 import argparse
-import os
 import shutil
+from tempfile import TemporaryDirectory
 
 class MyHelpFormatter(argparse.HelpFormatter):
     def __init__(self, *args, **kwargs):
@@ -9,11 +9,16 @@ class MyHelpFormatter(argparse.HelpFormatter):
 
 parser = argparse.ArgumentParser(formatter_class=MyHelpFormatter, description='Train or load a GRU4Rec model & measure recall and MRR on the specified test set(s).')
 parser.add_argument('path', metavar='PATH', type=str, help='Path to the training data (TAB separated file (.tsv or .txt) or pickled pandas.DataFrame object (.pickle)) (if the --load_model parameter is NOT provided) or to the serialized model (if the --load_model parameter is provided).')
+parser.add_argument('-f', '--format', type=str, default='exploded', help='Which format to use, options are: joined or exploded. In exploded a tab-separated dataset is expected. In joined a parquet file.')
 parser.add_argument('-ps', '--parameter_string', metavar='PARAM_STRING', type=str, help='Training parameters provided as a single parameter string. The format of the string is `param_name1=param_value1,param_name2=param_value2...`, e.g.: `loss=bpr-max,layers=100,constrained_embedding=True`. Boolean training parameters should be either True or False; parameters that can take a list should use / as the separator (e.g. layers=200/200). Mutually exclusive with the -pf (--parameter_file) and the -l (--load_model) arguments and one of the three must be provided.')
 parser.add_argument('-pf', '--parameter_file', metavar='PARAM_PATH', type=str, help='Alternatively, training parameters can be set using a config file specified in this argument. The config file must contain a single OrderedDict named `gru4rec_params`. The parameters must have the appropriate type (e.g. layers = [100]). Mutually exclusive with the -ps (--parameter_string) and the -l (--load_model) arguments and one of the three must be provided.')
 parser.add_argument('-l', '--load_model', action='store_true', help='Load an already trained model instead of training a model. Mutually exclusive with the -ps (--parameter_string) and the -pf (--parameter_file) arguments and one of the three must be provided.')
 parser.add_argument('-s', '--save_model', metavar='MODEL_PATH', type=str, help='Save the trained model to the MODEL_PATH. (Default: don\'t save model)')
 parser.add_argument('-t', '--test', metavar='TEST_PATH', type=str, nargs='+', help='Path to the test data set(s) located at TEST_PATH. Multiple test sets can be provided (separate with spaces). (Default: don\'t evaluate the model)')
+parser.add_argument('-i', '--inference', metavar='INFERENCE_PATH', type=str, nargs='+', help='Two paths: first path to the dataset to infer model and the second path to store the output.')
+parser.add_argument('-nnbp', '--nn_base_path', metavar='NN_BASE_PATH', type=str, nargs='+', help='Two paths: to the nn base (i -> nns of i) and to the nn base index (parquet with column id)')
+parser.add_argument('-np', '--n_prefetch', metavar='N_PREFETCH', type=int, help='Number of items in prefetch.')
+parser.add_argument('-ibs', '--inference_batch_size', metavar='INFERENCE_BATCH_SIZE', type=int, help='Batch size during inference.')
 parser.add_argument('-m', '--measure', metavar='AT', type=int, nargs='+', default=[20], help='Measure recall & MRR at the defined recommendation list length(s). Multiple values can be provided. (Default: 20)')
 parser.add_argument('-e', '--eval_type', metavar='EVAL_TYPE', choices=['standard', 'conservative', 'median', 'tiebreaking'], default='standard', help='Sets how to handle if multiple items in the ranked list have the same prediction score (which is usually due to saturation or an error). See the documentation of evaluate_gpu() in evaluation.py for further details. (Default: standard)')
 parser.add_argument('-ss', '--sample_store_size', metavar='SS', type=int, default=10000000, help='GRU4Rec uses a buffer for negative samples during training to maximize GPU utilization. This parameter sets the buffer length. Lower values require more frequent recomputation, higher values use more (GPU) memory. Unless you know what you are doing, you shouldn\'t mess with this parameter. (Default: 10000000)')
@@ -26,54 +31,24 @@ orig_cwd = os.getcwd()
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
 import numpy as np
 import pandas as pd
-import datetime as dt
 import sys
 import time
 from collections import OrderedDict
 from gru4rec import GRU4Rec
+import data_util
 import evaluation
+import inference
+import prefetch
 import importlib.util
-import joblib
 os.chdir(orig_cwd)
 
-def load_data(fname, gru):
-    if fname.endswith('.pickle'):
-        print('Loading data from pickle file: {}'.format(fname))
-        data = joblib.load(fname)
-        if gru.session_key not in data.columns:
-            print('ERROR. The column specified for session IDs "{}" is not in the data file ({})'.format(gru.session_key, fname))
-            print('The default column name is "SessionId", but you can specify otherwise by setting the `session_key` parameter of the model.')
-            sys.exit(1)
-        if gru.item_key not in data.columns:
-            print('ERROR. The column specified for item IDs "{}" is not in the data file ({})'.format(gru.item_key, fname))
-            print('The default column name is "ItemId", but you can specify otherwise by setting the `item_key` parameter of the model.')
-            sys.exit(1)
-        if gru.time_key not in data.columns:
-            print('ERROR. The column specified for time "{}" is not in the data file ({})'.format(gru.time_key, fname))
-            print('The default column name is "Time", but you can specify otherwise by setting the `time_key` parameter of the model.')
-            sys.exit(1)
-    else:
-        with open(fname, 'rt') as f:
-            header = f.readline().strip().split('\t')
-        if gru.session_key not in header:
-            print('ERROR. The column specified for session IDs "{}" is not in the data file ({})'.format(gru.session_key, fname))
-            print('The default column name is "SessionId", but you can specify otherwise by setting the `session_key` parameter of the model.')
-            sys.exit(1)
-        if gru.item_key not in header:
-            print('ERROR. The colmn specified for item IDs "{}" is not in the data file ({})'.format(gru.item_key, fname))
-            print('The default column name is "ItemId", but you can specify otherwise by setting the `item_key` parameter of the model.')
-            sys.exit(1)
-        if gru.time_key not in header:
-            print('ERROR. The column specified for time "{}" is not in the data file ({})'.format(gru.time_key, fname))
-            print('The default column name is "Time", but you can specify otherwise by setting the `time_key` parameter of the model.')
-            sys.exit(1)
-        print('Loading data from TAB separated file: {}'.format(fname))
-        data = pd.read_csv(fname, sep='\t', usecols=[gru.session_key, gru.item_key, gru.time_key], dtype={gru.session_key:'int32', gru.item_key:np.str})
-    return data
 
 if (args.parameter_string is not None) + (args.parameter_file is not None) + (args.load_model) != 1:
     print('ERROR. Exactly one of the following parameters must be provided: --parameter_string, --parameter_file, --load_model')
     sys.exit(1)
+
+if args.format == data_util.JOINED:
+    tmp_dir = TemporaryDirectory()
 
 if args.load_model:
     print('Loading trained model from file: {}'.format(args.path))
@@ -91,8 +66,19 @@ else:
         gru4rec_params = OrderedDict([x.split('=') for x in args.parameter_string.split(',')])
     gru = GRU4Rec()
     gru.set_params(**gru4rec_params)
+    if args.format == data_util.JOINED:
+        joined_train = pd.read_parquet(args.path)
+        if args.inference is not None:
+            joined_test = pd.read_parquet(args.inference[0])
+            joined_train = pd.concat([joined_train, joined_test])
+        train_path = data_util.convert_joined_ds_and_store(joined_train, 'train.tsv', tmp_dir)
+    elif args.format == data_util.EXPLODED:
+        train_path = args.path
+    else:
+        print('--format (-f) option must be one of two: {}/{}, but it is {}.'.format(data_util.JOINED, data_util.EXPLODED, args.format))
+        sys.exit(1)
     print('Loading training data...')
-    data = load_data(args.path, gru)
+    data = data_util.load_data(train_path, gru)
     store_type = 'cpu' if args.sample_store_on_cpu else 'gpu'
     if store_type == 'cpu':
         print('WARNING! The sample store is set to be on the CPU. This will make training significantly slower on the GPU.')
@@ -114,11 +100,20 @@ if args.test_against_items is not None:
     supp = data.groupby('ItemId').size()
     supp.sort_values(inplace=True, ascending=False)
     items = supp[:args.test_against_items].index
-    
+
+if (args.test is not None) + (args.inference is not None) > 1:
+    print('ERROR. Maximum one of the following parameters must be provided: --test, --inference')
+    sys.exit(1)
+
 if args.test is not None:
     for test_file in args.test:
+        if args.format == data_util.JOINED:
+            joined_test = pd.read_parquet(test_file)
+            test_path = data_util.convert_joined_ds_and_store(joined_test, 'test.tsv', tmp_dir)
+        else:
+            test_path = test_file
         print('Loading test data...')
-        test_data = load_data(test_file, gru)
+        test_data = data_util.load_data(test_path, gru)
         for c in args.measure:
             print('Starting evaluation (cut-off={}, using {} mode for tiebreaking)'.format(c, args.eval_type))
             t0 = time.time()
@@ -126,3 +121,56 @@ if args.test is not None:
             t1 = time.time()
             print('Evaluation took {:.2f}s'.format(t1 - t0))
             print('Recall@{}: {:.6f} MRR@{}: {:.6f}'.format(c, res[0], c, res[1]))
+
+if args.inference is not None:
+    if len(args.measure) != 1:
+        print('Must use only one cutoff for inference, got list {}'.format(args.measure))
+        sys.exit(1)
+    if len(args.inference) != 2:
+        print('--inference (-i) must contain two paths: first for input and second for output')
+        sys.exit(1)
+    if args.format != data_util.JOINED:
+        print('Must use inference only with --format (-f) set to joined, but use with {} instead'.format(args.format))
+        sys.exit(1)
+    if args.test_against_items is not None:
+        print('Option --test_against_items during inference is not supported during inference, but it is assigned {}'.format(args.test_against_items))
+        sys.exit(1)
+    if args.nn_base_path is None or args.n_prefetch is None:
+        print('Options --nn_base_path (-nnbp) and --n_prefetch (-np) must be assigned during inference, but at least one of them is None')
+        sys.exit(1)
+    if len(args.nn_base_path) != 2:
+        print('Option --nn_base path must contain two paths: to the nn_base and to the nn_base index')
+        sys.exit(1)
+    if not os.path.exists(args.nn_base_path[0]) or not os.path.exists(args.nn_base_path[1]):
+        print('''NN base doesn't exist for the model, please build nn base with build_nn_base.py first''')
+        sys.exit(1)
+    joined_input_path = args.inference[0]
+    joined_input_fname = os.path.basename(joined_input_path)
+    some_item_id = gru.itemidmap.index[0]
+    joined_input = pd.read_parquet(joined_input_path)
+    data_util.add_idle_item(joined_input, some_item_id)
+    input_path = data_util.convert_joined_ds_and_store(joined_input, joined_input_fname, tmp_dir)
+    output_path = args.inference[1]
+    print('Loading inference data from path {}'.format(input_path))
+    input_data = data_util.load_data(input_path, gru)
+    c = args.measure[0]
+    print('Start building prefetch...')
+    t0 = time.time()
+    nn_base = np.load(args.nn_base_path[0])
+    nn_base_idx = pd.read_parquet(args.nn_base_path[1]).id.values.tolist()
+    prefetch_ds = prefetch.build_prefetch(gru.itemidmap, input_data, nn_base, nn_base_idx, args.n_prefetch)
+    t1 = time.time()
+    print('End building prefetch, took {:.2f}s'.format(t1 - t0))
+    print('Starting inference (cut-off={}, using {} mode for tiebreaking)'.format(c, args.eval_type))
+    t0 = time.time()
+    results = inference.infer_gpu(gru, input_data, prefetch_ds, batch_size=args.inference_batch_size, cut_off=c)
+    t1 = time.time()
+    print('Inference took {:.2f}s'.format(t1 - t0))
+    print('Saving results to {}'.format(output_path))
+    t2 = time.time()
+    results.to_parquet(output_path, engine='pyarrow')
+    t3 = time.time()
+    print('Saving took {:.2f}s'.format(t3 - t2))
+
+if args.format == data_util.JOINED:
+    tmp_dir.cleanup()
